@@ -3,8 +3,8 @@ package acl
 
 import "strings"
 
-func CheckTopicAuth(ACLInfo *ACLConfig, typ int, ip, username, clientid, topic string) bool {
-	for _, info := range ACLInfo.Info {
+func (c *ACLConfig) CheckTopicAuth(typ int, ip, username, clientid, topic string) bool {
+	for _, info := range c.Info {
 		ctyp := info.Typ
 		switch ctyp {
 		case CLIENTID:

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/eclipse/paho.mqtt.golang/packets"
-	"github.com/fhmq/hmq/lib/acl"
 	"github.com/fhmq/hmq/lib/sessions"
 	"github.com/fhmq/hmq/lib/topics"
 	"github.com/fhmq/hmq/pool"
@@ -33,21 +32,23 @@ type Message struct {
 }
 
 type Broker struct {
-	id          string
-	cid         uint64
-	mu          sync.Mutex
-	config      *Config
-	tlsConfig   *tls.Config
-	AclConfig   *acl.ACLConfig
-	wpool       *pool.WorkerPool
-	clients     sync.Map
-	routes      sync.Map
-	remotes     sync.Map
-	nodes       map[string]interface{}
-	clusterPool chan *Message
-	queues      map[string]int
-	topicsMgr   *topics.Manager
-	sessionMgr  *sessions.Manager
+	id            string
+	cid           uint64
+	mu            sync.Mutex
+	config        *Config
+	tlsConfig     *tls.Config
+	Auth          Checker
+	wpool         *pool.WorkerPool
+	clients       sync.Map
+	routes        sync.Map
+	remotes       sync.Map
+	nodes         map[string]interface{}
+	clusterPool   chan *Message
+	queues        map[string]int
+	topicsMgr     *topics.Manager
+	sessionMgr    *sessions.Manager
+	CanConnect    func(msg *packets.ConnectPacket) bool
+	OnlineOffline func(client ClientInfo, online bool)
 	// messagePool []chan *Message
 }
 
@@ -90,15 +91,6 @@ func NewBroker(config *Config) (*Broker, error) {
 			return nil, err
 		}
 		b.tlsConfig = tlsconfig
-	}
-	if b.config.Acl {
-		aclconfig, err := acl.AclConfigLoad(b.config.AclConf)
-		if err != nil {
-			log.Error("Load acl conf error", zap.Error(err))
-			return nil, err
-		}
-		b.AclConfig = aclconfig
-		b.StartAclWatcher()
 	}
 	return b, nil
 }
@@ -311,6 +303,17 @@ func (b *Broker) handleConnection(typ int, conn net.Conn) {
 		log.Error("received msg that was not Connect")
 		return
 	}
+	if b.CanConnect != nil && !b.CanConnect(msg) {
+		connack := packets.NewControlPacket(packets.Connack).(*packets.ConnackPacket)
+		connack.ReturnCode = packets.ErrRefusedNotAuthorised
+		connack.SessionPresent = msg.CleanSession
+		err = connack.Write(conn)
+		if err != nil {
+			log.Error("send connack error, ", zap.Error(err), zap.String("clientID", msg.ClientIdentifier))
+			return
+		}
+		return
+	}
 	connack := packets.NewControlPacket(packets.Connack).(*packets.ConnackPacket)
 	connack.ReturnCode = packets.Accepted
 	connack.SessionPresent = msg.CleanSession
@@ -330,10 +333,10 @@ func (b *Broker) handleConnection(typ int, conn net.Conn) {
 	} else {
 		willmsg = nil
 	}
-	info := info{
-		clientID:  msg.ClientIdentifier,
-		username:  msg.Username,
-		password:  msg.Password,
+	info := ClientInfo{
+		ClientID:  msg.ClientIdentifier,
+		Username:  msg.Username,
+		Password:  msg.Password,
 		keepalive: msg.Keepalive,
 		willMsg:   willmsg,
 	}
@@ -349,11 +352,11 @@ func (b *Broker) handleConnection(typ int, conn net.Conn) {
 
 	err = b.getSession(c, msg, connack)
 	if err != nil {
-		log.Error("get session error: ", zap.String("clientID", c.info.clientID))
+		log.Error("get session error: ", zap.String("clientID", c.info.ClientID))
 		return
 	}
 
-	cid := c.info.clientID
+	cid := c.info.ClientID
 
 	var exist bool
 	var old interface{}
@@ -362,7 +365,7 @@ func (b *Broker) handleConnection(typ int, conn net.Conn) {
 	case CLIENT:
 		old, exist = b.clients.Load(cid)
 		if exist {
-			log.Warn("client exist, close old...", zap.String("clientID", c.info.clientID))
+			log.Warn("client exist, close old...", zap.String("clientID", c.info.ClientID))
 			ol, ok := old.(*client)
 			if ok {
 				ol.Close()
@@ -370,7 +373,7 @@ func (b *Broker) handleConnection(typ int, conn net.Conn) {
 		}
 		b.clients.Store(cid, c)
 
-		b.OnlineOfflineNotification(cid, true)
+		b.OnlineOfflineNotification(c.info, true)
 	case ROUTER:
 		old, exist = b.routes.Load(cid)
 		if exist {
@@ -415,8 +418,8 @@ func (b *Broker) ConnectToDiscovery() {
 	log.Debug("connect to router success :", zap.String("Router", b.config.Router))
 
 	cid := b.id
-	info := info{
-		clientID:  cid,
+	info := ClientInfo{
+		ClientID:  cid,
 		keepalive: 60,
 	}
 
@@ -491,8 +494,8 @@ func (b *Broker) connectRouter(id, addr string) {
 	}
 	cid := GenUniqueId()
 
-	info := info{
-		clientID:  cid,
+	info := ClientInfo{
+		ClientID:  cid,
 		keepalive: 60,
 	}
 
@@ -601,7 +604,7 @@ func (b *Broker) BroadcastSubOrUnsubMessage(packet packets.ControlPacket) {
 }
 
 func (b *Broker) removeClient(c *client) {
-	clientId := string(c.info.clientID)
+	clientId := string(c.info.ClientID)
 	typ := c.typ
 	switch typ {
 	case CLIENT:
@@ -646,11 +649,14 @@ func (b *Broker) BroadcastUnSubscribe(subs map[string]*subscription) {
 	}
 }
 
-func (b *Broker) OnlineOfflineNotification(clientID string, online bool) {
+func (b *Broker) OnlineOfflineNotification(client ClientInfo, online bool) {
+	if b.OnlineOffline != nil {
+		b.OnlineOffline(client, online)
+	}
 	packet := packets.NewControlPacket(packets.Publish).(*packets.PublishPacket)
-	packet.TopicName = "$SYS/broker/connection/clients/" + clientID
+	packet.TopicName = "$SYS/broker/connection/clients/" + client.ClientID
 	packet.Qos = 0
-	packet.Payload = []byte(fmt.Sprintf(`{"clientID":"%s","online":%v,"timestamp":"%s"}`, clientID, online, time.Now().UTC().Format(time.RFC3339)))
+	packet.Payload = []byte(fmt.Sprintf(`{"clientID":"%s","online":%v,"timestamp":"%s"}`, client.ClientID, online, time.Now().UTC().Format(time.RFC3339)))
 
 	b.PublishMessage(packet)
 }

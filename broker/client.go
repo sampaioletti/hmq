@@ -38,7 +38,7 @@ type client struct {
 	mu         sync.Mutex
 	broker     *Broker
 	conn       net.Conn
-	info       info
+	info       ClientInfo
 	route      route
 	status     int
 	ctx        context.Context
@@ -58,14 +58,14 @@ type subscription struct {
 	queue  bool
 }
 
-type info struct {
-	clientID  string
-	username  string
-	password  []byte
+type ClientInfo struct {
+	ClientID  string
+	Username  string
+	Password  []byte
 	keepalive uint16
 	willMsg   *packets.PublishPacket
 	localIP   string
-	remoteIP  string
+	RemoteIP  string
 }
 
 type route struct {
@@ -80,7 +80,7 @@ var (
 func (c *client) init() {
 	c.status = Connected
 	c.info.localIP = strings.Split(c.conn.LocalAddr().String(), ":")[0]
-	c.info.remoteIP = strings.Split(c.conn.RemoteAddr().String(), ":")[0]
+	c.info.RemoteIP = strings.Split(c.conn.RemoteAddr().String(), ":")[0]
 	c.ctx, c.cancelFunc = context.WithCancel(context.Background())
 	c.subMap = make(map[string]*subscription)
 	c.topicsMgr = c.broker.topicsMgr
@@ -103,13 +103,13 @@ func (c *client) readLoop() {
 		default:
 			//add read timeout
 			if err := nc.SetReadDeadline(time.Now().Add(timeOut)); err != nil {
-				log.Error("set read timeout error: ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+				log.Error("set read timeout error: ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 				return
 			}
 
 			packet, err := packets.ReadPacket(nc)
 			if err != nil {
-				log.Error("read packet error: ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+				log.Error("read packet error: ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 				msg := &Message{client: c, packet: DisconnectdPacket}
 				b.SubmitWork(msg)
 				return
@@ -131,7 +131,7 @@ func ProcessMessage(msg *Message) {
 	if ca == nil {
 		return
 	}
-	log.Debug("Recv message:", zap.String("message type", reflect.TypeOf(msg.packet).String()[9:]), zap.String("ClientID", c.info.clientID))
+	log.Debug("Recv message:", zap.String("message type", reflect.TypeOf(msg.packet).String()[9:]), zap.String("ClientID", c.info.ClientID))
 	switch ca.(type) {
 	case *packets.ConnackPacket:
 	case *packets.ConnectPacket:
@@ -156,7 +156,7 @@ func ProcessMessage(msg *Message) {
 	case *packets.DisconnectPacket:
 		c.Close()
 	default:
-		log.Info("Recv Unknow message.......", zap.String("ClientID", c.info.clientID))
+		log.Info("Recv Unknow message.......", zap.String("ClientID", c.info.ClientID))
 	}
 }
 
@@ -172,7 +172,7 @@ func (c *client) ProcessPublish(packet *packets.PublishPacket) {
 	}
 
 	if !c.CheckTopicAuth(PUB, topic) {
-		log.Error("Pub Topics Auth failed, ", zap.String("topic", topic), zap.String("ClientID", c.info.clientID))
+		log.Error("Pub Topics Auth failed, ", zap.String("topic", topic), zap.String("ClientID", c.info.ClientID))
 		return
 	}
 
@@ -183,14 +183,14 @@ func (c *client) ProcessPublish(packet *packets.PublishPacket) {
 		puback := packets.NewControlPacket(packets.Puback).(*packets.PubackPacket)
 		puback.MessageID = packet.MessageID
 		if err := c.WriterPacket(puback); err != nil {
-			log.Error("send puback error, ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+			log.Error("send puback error, ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 			return
 		}
 		c.ProcessPublishMessage(packet)
 	case QosExactlyOnce:
 		return
 	default:
-		log.Error("publish with unknown qos", zap.String("ClientID", c.info.clientID))
+		log.Error("publish with unknown qos", zap.String("ClientID", c.info.ClientID))
 		return
 	}
 
@@ -209,13 +209,13 @@ func (c *client) ProcessPublishMessage(packet *packets.PublishPacket) {
 
 	if packet.Retain {
 		if err := c.topicsMgr.Retain(packet); err != nil {
-			log.Error("Error retaining message: ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+			log.Error("Error retaining message: ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 		}
 	}
 
 	err := c.topicsMgr.Subscribers([]byte(packet.TopicName), packet.Qos, &c.subs, &c.qoss)
 	if err != nil {
-		log.Error("Error retrieving subscribers list: ", zap.String("ClientID", c.info.clientID))
+		log.Error("Error retrieving subscribers list: ", zap.String("ClientID", c.info.ClientID))
 		return
 	}
 
@@ -234,7 +234,7 @@ func (c *client) ProcessPublishMessage(packet *packets.PublishPacket) {
 			}
 			err := s.client.WriterPacket(packet)
 			if err != nil {
-				log.Error("process message for psub error,  ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+				log.Error("process message for psub error,  ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 			}
 		}
 
@@ -262,7 +262,7 @@ func (c *client) ProcessSubscribe(packet *packets.SubscribePacket) {
 		t := topic
 		//check topic auth for client
 		if !c.CheckTopicAuth(SUB, topic) {
-			log.Error("Sub topic Auth failed: ", zap.String("topic", topic), zap.String("ClientID", c.info.clientID))
+			log.Error("Sub topic Auth failed: ", zap.String("topic", topic), zap.String("ClientID", c.info.ClientID))
 			retcodes = append(retcodes, QosFailure)
 			continue
 		}
@@ -289,7 +289,7 @@ func (c *client) ProcessSubscribe(packet *packets.SubscribePacket) {
 
 	err := c.WriterPacket(suback)
 	if err != nil {
-		log.Error("send suback error, ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+		log.Error("send suback error, ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 		return
 	}
 	//broadcast subscribe message
@@ -300,9 +300,9 @@ func (c *client) ProcessSubscribe(packet *packets.SubscribePacket) {
 	//process retain message
 	for _, rm := range c.rmsgs {
 		if err := c.WriterPacket(rm); err != nil {
-			log.Error("Error publishing retained message:", zap.Any("err", err), zap.String("ClientID", c.info.clientID))
+			log.Error("Error publishing retained message:", zap.Any("err", err), zap.String("ClientID", c.info.ClientID))
 		} else {
-			log.Info("process retain  message: ", zap.Any("packet", packet), zap.String("ClientID", c.info.clientID))
+			log.Info("process retain  message: ", zap.Any("packet", packet), zap.String("ClientID", c.info.ClientID))
 		}
 	}
 }
@@ -332,7 +332,7 @@ func (c *client) ProcessUnSubscribe(packet *packets.UnsubscribePacket) {
 
 	err := c.WriterPacket(unsuback)
 	if err != nil {
-		log.Error("send unsuback error, ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+		log.Error("send unsuback error, ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 		return
 	}
 	// //process ubsubscribe message
@@ -348,7 +348,7 @@ func (c *client) ProcessPing() {
 	resp := packets.NewControlPacket(packets.Pingresp).(*packets.PingrespPacket)
 	err := c.WriterPacket(resp)
 	if err != nil {
-		log.Error("send PingResponse error, ", zap.Error(err), zap.String("ClientID", c.info.clientID))
+		log.Error("send PingResponse error, ", zap.Error(err), zap.String("ClientID", c.info.ClientID))
 		return
 	}
 }
@@ -378,7 +378,7 @@ func (c *client) Close() {
 		if c.typ == CLIENT {
 			b.BroadcastUnSubscribe(subs)
 			//offline notification
-			b.OnlineOfflineNotification(c.info.clientID, false)
+			b.OnlineOfflineNotification(c.info, false)
 		}
 
 		if c.info.willMsg != nil {

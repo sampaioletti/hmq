@@ -9,6 +9,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/fhmq/hmq/logger"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -20,6 +24,11 @@ const (
 	IP       = "ip"
 	ALLOW    = "allow"
 	DENY     = "deny"
+)
+
+var (
+	w   *Watcher
+	log *zap.Logger
 )
 
 type AuthInfo struct {
@@ -36,12 +45,16 @@ type ACLConfig struct {
 }
 
 func AclConfigLoad(file string) (*ACLConfig, error) {
+	log = logger.Get().Named("Broker")
 	if file == "" {
 		file = "./conf/acl.conf"
 	}
 	aclconifg := &ACLConfig{
 		File: file,
 		Info: make([]*AuthInfo, 0, 4),
+	}
+	if w == nil {
+		w = NewWatcher(aclconifg)
 	}
 	err := aclconifg.Prase()
 	if err != nil {

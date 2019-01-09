@@ -13,6 +13,8 @@ import (
 	"runtime"
 
 	"github.com/fhmq/hmq/broker"
+	"github.com/fhmq/hmq/lib/acl"
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -27,6 +29,14 @@ func main() {
 	if err != nil {
 		fmt.Println("New Broker error: ", err)
 		return
+	}
+	if config.Acl {
+		aclconfig, err := acl.AclConfigLoad(config.AclConf)
+		if err != nil {
+			fmt.Println("Load acl conf error", zap.Error(err))
+			return
+		}
+		b.Auth = aclconfig
 	}
 	b.Start()
 

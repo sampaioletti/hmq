@@ -50,7 +50,7 @@ func (c *client) SendConnect() {
 	m := packets.NewControlPacket(packets.Connect).(*packets.ConnectPacket)
 
 	m.CleanSession = true
-	m.ClientIdentifier = c.info.clientID
+	m.ClientIdentifier = c.info.ClientID
 	m.Keepalive = uint16(60)
 	err := c.WriterPacket(m)
 	if err != nil {
